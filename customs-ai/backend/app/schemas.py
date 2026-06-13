@@ -89,3 +89,17 @@ class HealthOut(BaseModel):
     status: str
     models: dict
     gpu: dict
+
+
+# ---- On-demand explain (POST /cases/{id}/explain) ----
+class ExplainAcceptedOut(BaseModel):
+    case_id: str
+    status: str  # "accepted" — tokenlar /ws orqali keladi
+
+
+# ---- TTS (POST /tts) ----
+class TtsIn(BaseModel):
+    text: str
+    language: str | None = None
+    case_id: str | None = None       # berilsa TTS_DONE audit shu case ostida
+    operator_id: str | None = None

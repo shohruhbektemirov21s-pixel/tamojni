@@ -121,12 +121,32 @@ def _build_explainer(settings: Settings, orchestrator: GpuOrchestrator):
         return MockExplainer()
 
 
+def _build_synthesizer(settings: Settings):
+    """Real TTS (Dev 3) — speech.py'da bo'lsa; aks holda mock (offline)."""
+    from app.pipelines.mocks import MockSynthesizer
+
+    try:
+        from app.pipelines.speech import WhisperTtsSynthesizer  # Dev 3 yetkazadi
+
+        synth = WhisperTtsSynthesizer()
+        log.info("TTS: REAL synthesizer (%s)", type(synth).__name__)
+        return synth
+    except Exception as exc:  # noqa: BLE001 - yo'q/xato bo'lsa mock
+        log.warning("TTS: real synthesizer yo'q (%s) -> MOCK", exc)
+        return MockSynthesizer()
+
+
 def build_providers(settings: Settings, orchestrator: GpuOrchestrator) -> dict:
     # RuleEngine deterministik va modelga bog'liq emas — har doim real ishlatamiz.
     from app.pipelines.scoring import RuleEngine
 
     if settings.use_mocks:
-        from app.pipelines.mocks import MockDetector, MockExplainer, MockTranscriber
+        from app.pipelines.mocks import (
+            MockDetector,
+            MockExplainer,
+            MockSynthesizer,
+            MockTranscriber,
+        )
 
         log.info("Provayderlar: MOCK rejimi (RuleEngine real)")
         return {
@@ -134,6 +154,7 @@ def build_providers(settings: Settings, orchestrator: GpuOrchestrator) -> dict:
             "risk_engine": RuleEngine(),
             "transcriber": MockTranscriber(),
             "explainer": MockExplainer(),
+            "synthesizer": MockSynthesizer(),
         }
 
     # Real rejim: detector/STT model bo'lsa real, LLM llm_enabled bo'lsa real.
@@ -142,6 +163,7 @@ def build_providers(settings: Settings, orchestrator: GpuOrchestrator) -> dict:
         "risk_engine": RuleEngine(),
         "transcriber": _build_transcriber(settings),
         "explainer": _build_explainer(settings, orchestrator),
+        "synthesizer": _build_synthesizer(settings),
     }
     log.info(
         "Provayderlar: REAL rejim (detector=%s, transcriber=%s, explainer=%s)",

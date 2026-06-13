@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     # WS subscriber'ning bounded navbati — sekin client pipeline'ni ushlamasligi
     # uchun to'lganda eng eski event tashlanadi (drop-oldest).
     event_subscriber_buffer: int = 1000
+    # Backpressure (burst): navbat shu nisbatdan oshsa `backpressure` event (drop
+    # EMAS — bounded put tabiiy sekinlashtiradi); past nisbatga tushsa "bo'shadi".
+    queue_high_watermark_ratio: float = 0.8
+    queue_low_watermark_ratio: float = 0.5
+
+    # --- TTS (Dev 3 synthesizer) ---
+    tts_default_language: str = "uz"
+    tts_max_chars: int = 2000          # juda uzun matnni rad et (resurs himoyasi)
 
     # --- Tier strategiyasi (sozlanadigan; Tamoyil 7: GPU bottleneck'dan qochish) ---
     # Tier 1 (detect+risk) HAR DOIM avtomatik, <1s push. LLM sintez (Tier 2, GPU)

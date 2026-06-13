@@ -25,8 +25,10 @@ from app.core.config import Settings
 from app.core.enums import AuditAction, CaseStatus
 from app.core.events import EventBus, EventType
 from app.core.orchestrator import GpuOrchestrator
+from app.pipelines.contracts import StreamingExplainer, StreamingTranscriber
 from app.repositories.case_repository import CaseRepository
 from app.services.audit_service import AuditService
+from app.services.serializers import serialize_case
 
 log = logging.getLogger("customs.worker")
 
@@ -58,6 +60,14 @@ class CaseWorker:
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=settings.queue_maxsize)
         self._task: asyncio.Task | None = None
         self._running = False
+        # Backpressure (burst himoyasi) — edge-triggered watermark signallari.
+        maxsize = max(1, settings.queue_maxsize)
+        self._bp_high = max(1, int(maxsize * settings.queue_high_watermark_ratio))
+        self._bp_low = int(maxsize * settings.queue_low_watermark_ratio)
+        self._bp_active = False
+        # On-demand explain (POST /cases/{id}/explain) — bir case uchun bittadan.
+        self._explaining: set[str] = set()
+        self._explain_tasks: set[asyncio.Task] = set()
 
     # ---- lifecycle ----
     async def start(self) -> None:
@@ -66,6 +76,8 @@ class CaseWorker:
 
     async def stop(self) -> None:
         self._running = False
+        for t in list(self._explain_tasks):
+            t.cancel()
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -73,7 +85,25 @@ class CaseWorker:
             self._task = None
 
     async def enqueue(self, case_id: str) -> None:
+        # bounded put: navbat to'la bo'lsa BU YERDA tabiiy backpressure (bloklanadi,
+        # drop EMAS). Watermark'dan oshganda operatorga ogohlantirish push qilamiz.
         await self._queue.put(case_id)
+        self._signal_backpressure(self._queue.qsize())
+
+    # ---- backpressure (edge-triggered) ----
+    def _signal_backpressure(self, depth: int) -> None:
+        if not self._bp_active and depth >= self._bp_high:
+            self._bp_active = True
+            self._emit(EventType.BACKPRESSURE, None,
+                       {"active": True, "depth": depth, "maxsize": self._queue.maxsize})
+            log.warning("Backpressure: navbat to'lib boryapti (%d/%d)", depth, self._queue.maxsize)
+
+    def _clear_backpressure(self, depth: int) -> None:
+        if self._bp_active and depth <= self._bp_low:
+            self._bp_active = False
+            self._emit(EventType.BACKPRESSURE, None,
+                       {"active": False, "depth": depth, "maxsize": self._queue.maxsize})
+            log.info("Backpressure bo'shadi (%d/%d)", depth, self._queue.maxsize)
 
     async def _loop(self) -> None:
         while self._running:
@@ -81,6 +111,7 @@ class CaseWorker:
                 case_id = await self._queue.get()
             except asyncio.CancelledError:
                 break
+            self._clear_backpressure(self._queue.qsize())
             try:
                 await self.process(case_id)
             except Exception as exc:  # noqa: BLE001
@@ -94,13 +125,18 @@ class CaseWorker:
                 self._queue.task_done()
 
     # ---- event push helperi (real-time relay) ----
-    def _emit(self, type: EventType, case_id: str, data: dict | None = None) -> None:
+    def _emit(self, type: EventType, case_id: str | None, data: dict | None = None) -> None:
         """Event bus'ga non-blocking push. Bus yo'q bo'lsa (eski test) — no-op.
 
         process() event loop ichida aylanadi, shuning uchun publish() to'g'ridan-to'g'ri.
         """
         if self.bus is not None:
             self.bus.publish(type, case_id, data)
+
+    def _emit_threadsafe(self, type: EventType, case_id: str | None, data: dict | None = None) -> None:
+        """Streaming consumer THREAD'idan push (partial/token) — loop'ga ko'chiradi."""
+        if self.bus is not None:
+            self.bus.publish_threadsafe(type, case_id, data)
 
     # ---- audit helperlari ----
     async def _audit(self, case_id: str, action: AuditAction, payload: dict | None = None) -> None:
@@ -121,18 +157,52 @@ class CaseWorker:
     async def _run_stt(self, case_id: str, audio_path: str | None) -> tuple[dict, float, bool]:
         if not audio_path:
             return dict(_EMPTY_TRANSCRIPT), 0.0, False  # audio yo'q = degradatsiya emas
+        transcriber = self.p["transcriber"]
+        streaming = isinstance(transcriber, StreamingTranscriber)
         t0 = time.perf_counter()
         try:
-            res = await asyncio.wait_for(
-                asyncio.to_thread(self.p["transcriber"].transcribe, audio_path, None),
-                timeout=self.s.stt_timeout_s,
-            )
+            if streaming:
+                # JONLI: partiallar thread ichidan stt_partial bo'lib push qilinadi.
+                res = await asyncio.wait_for(
+                    asyncio.to_thread(self._consume_stt_stream, case_id, transcriber, audio_path),
+                    timeout=self.s.stt_timeout_s,
+                )
+            else:
+                res = await asyncio.wait_for(
+                    asyncio.to_thread(transcriber.transcribe, audio_path, None),
+                    timeout=self.s.stt_timeout_s,
+                )
             res.setdefault("available", True)
             return res, (time.perf_counter() - t0) * 1000, False
         except Exception as exc:  # timeout ham shu yerga tushadi
             log.warning("STT degradatsiya (case %s): %s", case_id, exc)
             await self._audit_fail(case_id, "stt", exc)
             return dict(_EMPTY_TRANSCRIPT), (time.perf_counter() - t0) * 1000, True
+
+    def _consume_stt_stream(self, case_id: str, transcriber, audio_path: str) -> dict:
+        """THREAD: transcribe_stream partiallarini stt_partial qilib push qiladi.
+        Oxirgi (is_final=True) yield to'liq natijani beradi; bo'lmasa oxirgi partial."""
+        final: dict | None = None
+        last_text = ""
+        for partial in transcriber.transcribe_stream(audio_path, self.s.stt_language):
+            is_final = bool(partial.get("is_final"))
+            last_text = partial.get("text", last_text)
+            self._emit_threadsafe(
+                EventType.STT_PARTIAL, case_id,
+                {"text": partial.get("text"), "is_final": is_final,
+                 "language": partial.get("language")},
+            )
+            if is_final:
+                final = {
+                    "text": partial.get("text"),
+                    "language": partial.get("language"),
+                    "confidence": partial.get("confidence"),
+                    "available": True,
+                }
+        if final is None:  # provider final bermadi -> oxirgi partialdan tuzamiz
+            final = {"text": last_text or None, "language": self.s.stt_language,
+                     "confidence": None, "available": bool(last_text)}
+        return final
 
     async def _run_detection(self, case_id: str, image_path: str | None) -> tuple[list, float, bool]:
         t0 = time.perf_counter()
@@ -149,21 +219,30 @@ class CaseWorker:
     async def _run_synthesis(
         self, case_id: str, detections: list, transcript: dict, notes: str | None, risk: dict
     ) -> tuple[dict, float, bool]:
+        explainer = self.p["explainer"]
+        streaming = isinstance(explainer, StreamingExplainer)
         t0 = time.perf_counter()
         attempts = self.s.llm_max_retries + 1
         for attempt in range(attempts):
             try:
                 async with self.orch.gpu_session():
-                    res = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.p["explainer"].generate_explanation,
-                            detections,
-                            transcript,
-                            notes,
-                            risk,
-                        ),
-                        timeout=self.s.llm_timeout_s,
-                    )
+                    if streaming:
+                        # JONLI: tokenlar thread ichidan explanation_token bo'lib push.
+                        res = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._consume_llm_stream, case_id, explainer,
+                                detections, transcript, notes, risk,
+                            ),
+                            timeout=self.s.llm_timeout_s,
+                        )
+                    else:
+                        res = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                explainer.generate_explanation,
+                                detections, transcript, notes, risk,
+                            ),
+                            timeout=self.s.llm_timeout_s,
+                        )
                 res.setdefault("available", True)
                 return res, (time.perf_counter() - t0) * 1000, False
             except Exception as exc:  # noqa: BLE001
@@ -177,6 +256,20 @@ class CaseWorker:
                 if attempt == attempts - 1:
                     await self._audit_fail(case_id, "llm", exc)
         return dict(_EMPTY_EXPLANATION), (time.perf_counter() - t0) * 1000, True
+
+    def _consume_llm_stream(
+        self, case_id: str, explainer, detections, transcript, notes, risk
+    ) -> dict:
+        """THREAD: generate_explanation_stream tokenlarini explanation_token qilib push."""
+        tokens: list[str] = []
+        for tok in explainer.generate_explanation_stream(detections, transcript, notes, risk):
+            tokens.append(tok)
+            self._emit_threadsafe(EventType.EXPLANATION_TOKEN, case_id, {"token": tok})
+        return {
+            "text": "".join(tokens),
+            "generated_by": getattr(explainer, "model_version", None) or "stream-llm",
+            "available": True,
+        }
 
     # ---- Tier 2 (LLM) qaror: sozlanadigan flag (Tamoyil 7) ----
     def _should_run_llm(self, level: str) -> bool:
@@ -295,3 +388,66 @@ class CaseWorker:
         )
         log.info("Case %s yakunlandi (risk=%s, degraded=%s, %dms)",
                  case_id, risk["level"], degraded, timings["total"])
+
+    # ---- On-demand LLM (POST /cases/{id}/explain) ----
+    def request_explain(self, case_id: str) -> bool:
+        """LLM streaming'ni fon vazifa sifatida boshlaydi. Shu case allaqachon
+        ishlovda bo'lsa False qaytaradi (takror so'rovni rad etish uchun)."""
+        if case_id in self._explaining:
+            return False
+        self._explaining.add(case_id)
+        task = asyncio.create_task(self._explain_task(case_id), name=f"explain-{case_id}")
+        self._explain_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._explaining.discard(case_id)
+            self._explain_tasks.discard(t)
+
+        task.add_done_callback(_done)
+        return True
+
+    async def _explain_task(self, case_id: str) -> None:
+        try:
+            await self.explain_on_demand(case_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("On-demand explain xatosi (case %s)", case_id)
+            self._emit(EventType.MODEL_FAILED, case_id, {"stage": "llm_on_demand", "error": str(exc)})
+
+    async def explain_on_demand(self, case_id: str) -> None:
+        """Mavjud case uchun LLM tushuntirishini JONLI stream qiladi (GPU, serial).
+
+        Risk/detection allaqachon hisoblangan (Tier 1) — bu faqat tushuntirish
+        matnini yozadi (Tamoyil 1/2: risk score O'ZGARMAYDI)."""
+        case = await asyncio.to_thread(self.repo.get, case_id)
+        if case is None:
+            log.error("explain_on_demand: case %s topilmadi", case_id)
+            return
+        data = serialize_case(case)
+        risk = data["risk"]
+        if risk is None:
+            log.warning("explain_on_demand: case %s'da risk yo'q (Tier 1 tugamagan)", case_id)
+            self._emit(EventType.MODEL_FAILED, case_id, {"stage": "llm_on_demand", "error": "risk yo'q"})
+            return
+        detections = data["detections"]
+        transcript = data["transcript"] or dict(_EMPTY_TRANSCRIPT)
+        notes = case.operator_notes
+
+        explanation, _ms, failed = await self._run_synthesis(
+            case_id, detections, transcript, notes, risk
+        )
+        await asyncio.to_thread(self.repo.save_explanation, case_id, explanation)
+        if explanation.get("available"):
+            await self._audit(
+                case_id, AuditAction.EXPLANATION_DONE,
+                {"generated_by": explanation.get("generated_by"), "on_demand": True},
+            )
+        if failed:
+            await asyncio.to_thread(self.repo.set_degraded, case_id, True)
+        self._emit(
+            EventType.EXPLANATION_DONE, case_id,
+            {"available": explanation.get("available", False),
+             "generated_by": explanation.get("generated_by"),
+             "text": explanation.get("text"), "on_demand": True},
+        )

@@ -204,16 +204,25 @@ class CaseRepository:
             s.commit()
 
     def save_explanation(self, case_id: str, explanation: dict) -> None:
+        # Explanation one-to-one — on-demand /explain qayta yozishi mumkin (upsert).
         with self._sf() as s:
-            s.add(
-                Explanation(
-                    id=_nid(),
-                    case_id=case_id,
-                    content=explanation.get("text"),
-                    model_version=explanation.get("generated_by"),
-                    available=bool(explanation.get("available", False)),
+            row = s.execute(
+                select(Explanation).where(Explanation.case_id == case_id)
+            ).scalars().first()
+            if row is None:
+                s.add(
+                    Explanation(
+                        id=_nid(),
+                        case_id=case_id,
+                        content=explanation.get("text"),
+                        model_version=explanation.get("generated_by"),
+                        available=bool(explanation.get("available", False)),
+                    )
                 )
-            )
+            else:
+                row.content = explanation.get("text")
+                row.model_version = explanation.get("generated_by")
+                row.available = bool(explanation.get("available", False))
             s.commit()
 
     # ---- startup recovery (§10) ----

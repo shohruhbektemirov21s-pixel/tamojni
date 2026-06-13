@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.enums import CaseStatus
-from app.core.errors import NotFound
+from app.core.errors import Conflict, NotFound
 from app.schemas import (
     AuditEntryOut,
     AuditListOut,
@@ -16,6 +16,7 @@ from app.schemas import (
     CaseListItem,
     CaseListOut,
     CaseResultOut,
+    ExplainAcceptedOut,
 )
 from app.services.serializers import serialize_audit, serialize_case
 
@@ -47,6 +48,21 @@ async def create_case(
         source="manual",
     )
     return CaseCreatedOut(case_id=case_id, status=CaseStatus.PENDING)
+
+
+@router.post("/cases/{case_id}/explain", status_code=202, response_model=ExplainAcceptedOut)
+async def explain_case(request: Request, case_id: str) -> ExplainAcceptedOut:
+    """On-demand LLM tushuntirishni JONLI boshlaydi (tokenlar /ws orqali oqadi).
+
+    202 Accepted qaytaradi; explanation_token / explanation_done eventlari
+    WebSocket'da push qilinadi (Tier 2, GPU serial)."""
+    st = request.app.state
+    if await asyncio.to_thread(st.repo.get_status, case_id) is None:
+        raise NotFound("Case topilmadi", detail={"case_id": case_id})
+    if not st.worker.request_explain(case_id):
+        raise Conflict("Bu case uchun tushuntirish allaqachon yaratilmoqda",
+                       detail={"case_id": case_id})
+    return ExplainAcceptedOut(case_id=case_id, status="accepted")
 
 
 @router.get("/cases", response_model=CaseListOut)

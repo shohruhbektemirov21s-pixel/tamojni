@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api import cases, decisions, health, ws
+from app.api import cases, decisions, health, tts, ws
 from app.core.config import Settings, get_settings_singleton, load_risk_config
 from app.core.errors import AppError, ValidationFailed
 from app.core.events import EventBus
@@ -108,11 +108,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.event_bus = event_bus
     app.state.case_intake = case_intake
     app.state.scanner = scanner
+    app.state.providers = providers
 
     _register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(cases.router)
     app.include_router(decisions.router)
+    app.include_router(tts.router)
     app.include_router(ws.router)
     return app
 

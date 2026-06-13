@@ -32,6 +32,7 @@ log = logging.getLogger("customs.events")
 class EventType(str, Enum):
     # --- scanner ingestion ---
     SCAN_INGESTED = "scan_ingested"      # papkaga fayl tushdi -> avto case
+    SCAN_REJECTED = "scan_rejected"      # bo'sh/dublikat/korrupt fayl skip (case yo'q)
     CASE_CREATED = "case_created"        # case yozildi (qo'lda yoki avto)
     # --- Tier 1 (DARHOL, <1s, har skanga) ---
     TIER1_DONE = "tier1_done"            # detect + DETERMINISTIK risk tayyor

@@ -63,6 +63,13 @@ class CaseRepository:
             )
             s.commit()
 
+    def exists_attachment_sha256(self, sha256: str) -> bool:
+        """Shu sha256'li attachment bormi? (scanner restart'lararo dedup uchun)."""
+        with self._sf() as s:
+            return s.execute(
+                select(Attachment.id).where(Attachment.sha256 == sha256).limit(1)
+            ).first() is not None
+
     # ---- o'qish ----
     def get(self, case_id: str) -> Case | None:
         with self._sf() as s:

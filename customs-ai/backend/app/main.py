@@ -23,6 +23,7 @@ from app.db import init_db, make_engine, make_session_factory
 from app.models.guard import install_audit_guard
 from app.repositories.case_repository import CaseRepository
 from app.services.audit_service import AuditService
+from app.services.case_intake import CaseIntake
 from app.services.file_store import FileStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -54,19 +55,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         risk_config=risk_config,
         event_bus=event_bus,
     )
+    case_intake = CaseIntake(
+        repo=repo, audit=audit, file_store=file_store, worker=worker, event_bus=event_bus
+    )
+    scanner = None
+    if settings.scanner_enabled:
+        from app.ingestion import WatchedFolderSource
+
+        scanner = WatchedFolderSource(
+            folder=settings.scanner_inbox,
+            intake=case_intake,
+            event_bus=event_bus,
+            settings=settings,
+            repo=repo,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # threadsafe publish (watchdog) uchun ishlayotgan loop'ni bog'laymiz
-        event_bus.bind_loop(asyncio.get_running_loop())
+        # threadsafe publish/submit (watchdog) uchun ishlayotgan loop'ni bog'laymiz
+        loop = asyncio.get_running_loop()
+        event_bus.bind_loop(loop)
+        case_intake.bind_loop(loop)
         # startup recovery (§10): PROCESSING'da osilib qolganlar -> FAILED
         recovered = repo.recover_stuck()
         if recovered:
             log.warning("Startup recovery: %d osilib qolgan case FAILED ga o'tkazildi", recovered)
         await orchestrator.start()
         await worker.start()
+        if scanner is not None:
+            await scanner.start()
         log.info("Backend tayyor: http://%s:%s", settings.host, settings.port)
         yield
+        if scanner is not None:
+            await scanner.stop()
         await worker.stop()
         await orchestrator.stop()
 
@@ -85,6 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.orchestrator = orchestrator
     app.state.worker = worker
     app.state.event_bus = event_bus
+    app.state.case_intake = case_intake
+    app.state.scanner = scanner
 
     _register_exception_handlers(app)
     app.include_router(health.router)

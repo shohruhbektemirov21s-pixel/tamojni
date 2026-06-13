@@ -7,9 +7,8 @@ import json
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.core.enums import AuditAction, CaseStatus
-from app.core.errors import NotFound, ValidationFailed
-from app.core.events import EventType
+from app.core.enums import CaseStatus
+from app.core.errors import NotFound
 from app.schemas import (
     AuditEntryOut,
     AuditListOut,
@@ -34,33 +33,19 @@ async def create_case(
     operator_id: str | None = Form(None),
 ) -> CaseCreatedOut:
     st = request.app.state
-    st.file_store.check_capacity()  # disk to'la -> DiskFull(503)
-
     img_bytes = await image.read()
-    if not img_bytes:
-        raise ValidationFailed("Rasm bo'sh yoki yuborilmadi", detail={"field": "image"})
+    audio_bytes = await audio.read() if audio is not None else None
 
-    case_id = await asyncio.to_thread(
-        st.repo.create, operator_id=operator_id, operator_notes=notes
+    # Yagona ingestion yo'li (scanner ham shu servisni ishlatadi).
+    case_id = await st.case_intake.submit(
+        image_bytes=img_bytes,
+        image_filename=image.filename,
+        audio_bytes=audio_bytes or None,
+        audio_filename=audio.filename if audio is not None else None,
+        notes=notes,
+        operator_id=operator_id,
+        source="manual",
     )
-
-    img_att = st.file_store.save(case_id, "image", image.filename or "scan.png", img_bytes)
-    await asyncio.to_thread(st.repo.add_attachment, case_id, img_att)
-
-    has_audio = False
-    if audio is not None:
-        audio_bytes = await audio.read()
-        if audio_bytes:
-            has_audio = True
-            au_att = st.file_store.save(case_id, "audio", audio.filename or "audio.wav", audio_bytes)
-            await asyncio.to_thread(st.repo.add_attachment, case_id, au_att)
-
-    await asyncio.to_thread(
-        st.audit.log, case_id, operator_id or "operator",
-        AuditAction.CASE_CREATED.value, {"has_audio": has_audio},
-    )
-    await st.worker.enqueue(case_id)
-    st.event_bus.publish(EventType.CASE_CREATED, case_id, {"has_audio": has_audio, "source": "manual"})
     return CaseCreatedOut(case_id=case_id, status=CaseStatus.PENDING)
 
 

@@ -92,7 +92,30 @@ class Settings(BaseSettings):
     llm_auto_on_high: bool = True
     llm_auto_always: bool = False
 
+    # --- Scanner ingestion (WatchedFolderSource) ---
+    # Off by default — yoqilganda lifespan papkani watchdog bilan kuzatadi.
+    scanner_enabled: bool = False
+    scanner_folder: Path | None = None          # bo'sh -> data_dir/"inbox"
+    scanner_process_existing: bool = True        # startup'da papkadagi fayllarni ham qabul qil
+    scanner_extensions: str = ".png,.jpg,.jpeg,.bmp,.tif,.tiff,.dcm"  # csv (DICOM/TIFF qabul)
+    # Partial-fayl himoyasi: hajm shuncha marta o'zgarmasa "tayyor" deb hisoblanadi.
+    scanner_stable_checks: int = 3
+    scanner_poll_interval_s: float = 0.3
+    scanner_stable_timeout_s: float = 30.0       # bundan oshsa "hali o'syapti" -> skip
+
     # ---- hosil qilinadigan yo'llar ----
+    @property
+    def scanner_inbox(self) -> Path:
+        return self.scanner_folder or (self.data_dir / "inbox")
+
+    @property
+    def scanner_extension_set(self) -> set[str]:
+        return {
+            e.strip().lower() if e.strip().startswith(".") else "." + e.strip().lower()
+            for e in self.scanner_extensions.split(",")
+            if e.strip()
+        }
+
     @property
     def files_dir(self) -> Path:
         return self.data_dir / "files"

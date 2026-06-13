@@ -1,0 +1,8 @@
+# ML TRAIN-time bog'liqliklar — FAQAT train mashinasida (offline target'da EMAS).
+# Bu yerda torch/CUDA bor — bu ADR-002'ni buzmaydi, chunki train alohida mashinada
+# bo'ladi; target runtime'da faqat ONNX (CPU/DirectML) ishlaydi.
+ultralytics>=8.3       # YOLOv11 train/val/export
+onnx>=1.15
+onnxslim>=0.1          # eksportdan keyin grafni soddalashtirish
+pyyaml>=6.0
+numpy>=1.26

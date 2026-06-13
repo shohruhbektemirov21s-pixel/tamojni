@@ -1,0 +1,31 @@
+# Faza 2 (server) — air-gapped LAN. Faza 1 (laptop) buni ishlatmaydi.
+# Migration: SQLite->Postgres, in-proc queue->Redis (ADR-005/006, §17).
+services:
+  backend:
+    build: ./backend
+    environment:
+      CUSTOMS_HOST: "0.0.0.0"
+      CUSTOMS_USE_MOCKS: "false"
+      # Faza 2'da DB_URL Postgres'ga o'zgaradi (kod o'zgarmaydi — ORM).
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    # GPU: air-gapped serverda nvidia runtime bilan ulanadi.
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: customs
+      POSTGRES_USER: customs
+      POSTGRES_PASSWORD: change_me
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    # Concurrent case queue (ko'p operator).
+
+volumes:
+  pgdata:

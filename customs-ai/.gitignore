@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-stt/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Runtime data (offline — hech qachon repo'ga tushmaydi: maxfiy)
+backend/data/
+backend/.env
+
+# Model weights (katta artefaktlar — alohida deploy qilinadi)
+backend/models_weights/
+deploy/offline-wheels/wheels/
+
+# Vision model artefaktlari (katta binar — offline yetkaziladi, repo'da emas)
+backend/model_registry/**/*.onnx
+backend/model_registry/**/*.pt
+
+# ML track (vision)
+ml/datasets/
+ml/runs/
+ml/model_registry/*.onnx
+ml/model_registry/*.pt
+
+# STT track (audio/transkript maxfiy; modellar katta binar — offline)
+stt/data/*.jsonl
+stt/data/cv/
+stt/data/smoke_ru/          # gTTS smoke fixture'lari — regenerable (--generate)
+stt/runs/
+stt/models/
+
+# OS
+.DS_Store
+Thumbs.db

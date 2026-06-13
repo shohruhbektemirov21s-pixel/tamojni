@@ -1,0 +1,10 @@
+# STT TRAIN-time bog'liqliklar — FAQAT train mashinasida (target runtime'da EMAS).
+# Bu yerda torch/CUDA bor — ADR-002 buzilmaydi (train alohida mashina; target CPU/ct2).
+transformers>=4.40
+peft>=0.10               # LoRA fine-tune
+datasets>=2.18
+accelerate>=0.29
+jiwer>=3.0               # WER (eval CLI; yadro pure-python ham bor)
+ctranslate2>=4.0         # ct2-transformers-converter
+soundfile>=0.12
+torch>=2.2               # GPU bo'lsa CUDA build; bo'lmasa CPU

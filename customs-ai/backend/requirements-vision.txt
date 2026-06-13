@@ -1,0 +1,15 @@
+# Vision runtime bog'liqliklari (Dev 2) — offline-wheels orqali o'rnatiladi.
+# Backend Core bularsiz ham ishlaydi (detection lazy import); faqat REAL detector
+# ishlatilganda kerak.
+#
+# ADR-002: GPU faqat Ollama'niki -> CUDA onnxruntime ATAYIN YO'Q.
+#   Windows (maqsadli): onnxruntime-directml (DirectML EP, RTX 2050 emas, iGPU/CPU).
+#   Linux/CI:           onnxruntime (CPU EP).
+# Ikkalasini bir vaqtda o'rnatmang — platformaga mosini tanlang.
+
+numpy>=1.26
+Pillow>=10.0
+
+# --- platformaga mos bittasini tanlang ---
+onnxruntime>=1.17            ; sys_platform != "win32"
+onnxruntime-directml>=1.17   ; sys_platform == "win32"

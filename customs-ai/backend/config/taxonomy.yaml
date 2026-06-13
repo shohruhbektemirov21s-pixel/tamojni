@@ -1,0 +1,53 @@
+# Taqiqlangan/shubhali predmetlar taksonomiyasi.
+# EGASI: Dev 2 + bojxona ekspertlari (O'zbekiston bojxona qoidalari asosida).
+# Vision (YOLO) class'lari shu ro'yxatga moslanadi.
+#
+# ⚠️ EKSPERT TASDIG'I SHART: bu ro'yxat bojxona huquqiy bazasiga (taqiqlangan/
+# cheklangan tovarlar) muvofiq tasdiqlanishi kerak. Hozircha — POC reference.
+
+# Detector class'lari (YOLO class INDEKSI -> taksonomiya nomi).
+# Bu yagona haqiqat manbasi: model_registry/.../labels.txt SHU tartibdan
+# generatsiya qilinadi (scripts: ml/sync_labels.py).
+classes:
+  0: qurol               # o'q otar qurol (piston, miltiq, qism)
+  1: o'q-dori            # patron, o'q, portlovchi kapsula
+  2: narkotik_paket      # zich o'ralgan organik paket (briket)
+  3: pichoq              # sovuq qurol, o'tkir tig'
+  4: valyuta_toplami     # zich naqd pul dastasi
+  5: organik_anomaliya   # kutilmagan organik zichlik (yashirin bo'shliqda)
+  6: yashirilgan_boshliq # konstruktiv yashirin bo'shliq (false compartment)
+
+# compute_risk audit teglashi va "topilmadi != xavfsiz" mantiq'i uchun
+# taqiqlangan class'lar ro'yxati (risk_rules.yaml bilan sinxron bo'lsin):
+prohibited_classes:
+  - qurol
+  - o'q-dori
+  - narkotik_paket
+  - pichoq
+  - valyuta_toplami
+  - organik_anomaliya
+  - yashirilgan_boshliq
+
+# Ochiq X-ray datasetlardan (SIXray/PIDray/OPIXray) bizning taksonomiyaga
+# moslash xaritasi (bootstrap bosqichi uchun; ml/prepare_dataset.py ishlatadi).
+# ⚠️ Litsenziya Sprint 0'da tekshiriladi — faqat bootstrap/POC, productionda emas.
+dataset_label_map:
+  # SIXray
+  Gun: qurol
+  Knife: pichoq
+  Wrench: null            # taksonomiyada yo'q -> tashlab yuboriladi
+  Pliers: null
+  Scissors: pichoq
+  # OPIXray (asosan pichoq turlari)
+  Folding_Knife: pichoq
+  Straight_Knife: pichoq
+  Utility_Knife: pichoq
+  Multi-tool_Knife: pichoq
+  # PIDray
+  Baton: null
+  Bullet: o'q-dori
+  Handcuffs: null
+  Lighter: null
+  Powerbank: null
+  Sprayer: null
+  HandGun: qurol

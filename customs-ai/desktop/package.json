@@ -1,0 +1,35 @@
+{
+  "name": "customs-operator-desktop",
+  "version": "0.1.0",
+  "description": "Offline Bojxona AI — Operator desktop ilovasi (REST/SSE iste'molchi, ADR-005)",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "mock": "node mock-server/server.mjs",
+    "dev": "electron-vite dev",
+    "dev:full": "concurrently -k -n MOCK,APP -c blue,green \"npm:mock\" \"npm:dev\"",
+    "build": "npm run typecheck && electron-vite build",
+    "build:win": "npm run build && electron-builder --win --x64",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "preview": "vite preview --base ./ --outDir out/renderer"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cors": "^2.8.5",
+    "electron": "^33.3.1",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.11"
+  }
+}

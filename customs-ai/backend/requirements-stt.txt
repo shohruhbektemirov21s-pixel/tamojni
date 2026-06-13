@@ -1,0 +1,11 @@
+# STT runtime bog'liqliklari (Dev 3) — offline-wheels orqali o'rnatiladi.
+# Backend Core bularsiz ham ishlaydi (speech lazy import); faqat REAL transcriber
+# ishlatilganda kerak.
+#
+# ADR-002: device="cpu", compute_type="int8" -> GPU Ollama'niki. CUDA YO'Q.
+# Model OLDINDAN yuklab olinadi (Tamoyil 1: offline). HF download bo'lmasin uchun
+# stt_download_root yoki stt_model_path lokal keshга ishora qiladi.
+
+faster-whisper>=1.0      # CTranslate2 backend (CPU int8)
+soundfile>=0.12          # audio davomiyligini probe qilish (near-real-time)
+av>=11.0                 # PyAV — faster-whisper audio dekodlash

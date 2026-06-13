@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="uz">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Offline by design: app assetlari 'self'dan. connect-src http:'ga ochiq, chunki
+         endpoint SOZLANADIGAN (Faza 2: 127.0.0.1 -> LAN server IP, ADR-005). Tashqi
+         https/CDN yo'q — barcha skript/stil/rasm 'self'. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http: ws:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bojxona Operator — Offline AI</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

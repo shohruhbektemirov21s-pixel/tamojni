@@ -1,0 +1,9 @@
+# Avtomatik generatsiya: python ml/sync_labels.py (config/taxonomy.yaml dan).
+# Qo'lda tahrirlaMANG. Qator tartibi = YOLO class indeksi (0 dan).
+qurol
+o'q-dori
+narkotik_paket
+pichoq
+valyuta_toplami
+organik_anomaliya
+yashirilgan_boshliq

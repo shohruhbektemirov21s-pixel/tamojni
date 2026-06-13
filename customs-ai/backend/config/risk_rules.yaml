@@ -1,0 +1,49 @@
+# Deterministik risk engine sozlamasi (Tamoyil 2, ADR-004).
+# EGASI: Dev 2. Bu reference/default qiymatlar — bojxona ekspertlari bilan
+# tasdiqlangach yangilanadi. Operator threshold/pollikni sozlay oladi; kod
+# o'zgarmaydi (qiymatlar shu YAML'dan yuklanadi).
+
+# Class ro'yxatda bo'lmasa ishlatiladigan og'irlik:
+default_weight: 0.2
+
+# Har taqiqlangan/shubhali class uchun og'irlik (0..1).
+# noisy-OR hissasi = weight * confidence.
+class_weights:
+  qurol: 1.0
+  o'q-dori: 1.0
+  narkotik_paket: 1.0
+  pichoq: 0.8
+  valyuta_toplami: 0.7
+  organik_anomaliya: 0.5
+  yashirilgan_boshliq: 0.6
+
+# Risk darajasi chegaralari (noisy-OR score 0..1 ga nisbatan):
+thresholds:
+  HIGH: 0.7
+  MEDIUM: 0.4
+
+# Global confidence pollik (floor): bundan past detection shovqin hisoblanadi
+# va skor'ga hissa qo'shmaydi (lekin audit uchun factors[] da ko'rinadi).
+min_confidence: 0.25
+
+# RECALL-FAVORING (qabul mezoni: qurol RECALL >= 0.95).
+# Xavfli class'lar uchun pollikni PAST qo'yamiz — false-negative bojxonada
+# false-positive'dan qimmatroq. Bu YOLO conf threshold'idan MUSTAQIL ikkinchi
+# himoya qatlami: detector past conf bersa ham, bu class'lar hisobga olinadi.
+per_class_min_confidence:
+  qurol: 0.10
+  o'q-dori: 0.10
+  narkotik_paket: 0.12
+  pichoq: 0.15
+
+# (Ixtiyoriy) audit teglash uchun: shu ro'yxatdagilar "prohibited_class",
+# qolganlari "watch_class" qoidasi bilan belgilanadi. Bo'sh bo'lsa hammasi
+# "prohibited_class" deb teglanadi. Manba: taxonomy.yaml.
+prohibited_classes:
+  - qurol
+  - o'q-dori
+  - narkotik_paket
+  - pichoq
+  - valyuta_toplami
+  - organik_anomaliya
+  - yashirilgan_boshliq

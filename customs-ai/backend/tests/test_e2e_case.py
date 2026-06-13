@@ -5,7 +5,8 @@ from tests.helpers import PNG, client_for, wait_done
 
 
 def test_empty_case_end_to_end(tmp_path):
-    with client_for(tmp_path) as client:
+    # to'liq Tier1+Tier2 yo'lini sinaymiz -> LLM'ni har case'ga yoqamiz
+    with client_for(tmp_path, llm_auto_always=True) as client:
         r = client.post("/cases", files={"image": PNG})
         assert r.status_code == 201
         body = r.json()
@@ -43,7 +44,7 @@ def test_empty_case_end_to_end(tmp_path):
 
 
 def test_audit_trail_recorded(tmp_path):
-    with client_for(tmp_path) as client:
+    with client_for(tmp_path, llm_auto_always=True) as client:
         case_id = client.post("/cases", files={"image": PNG}).json()["case_id"]
         wait_done(client, case_id)
 

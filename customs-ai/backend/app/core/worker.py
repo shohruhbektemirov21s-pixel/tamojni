@@ -23,7 +23,7 @@ import time
 
 from app.core.config import Settings
 from app.core.enums import AuditAction, CaseStatus
-from app.core.events import EventBus
+from app.core.events import EventBus, EventType
 from app.core.orchestrator import GpuOrchestrator
 from app.repositories.case_repository import CaseRepository
 from app.services.audit_service import AuditService
@@ -83,14 +83,24 @@ class CaseWorker:
                 break
             try:
                 await self.process(case_id)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 log.exception("Case %s ishlovida kutilmagan xato", case_id)
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(
                         self.repo.set_status, case_id, CaseStatus.FAILED.value, completed=True
                     )
+                self._emit(EventType.CASE_FAILED, case_id, {"error": str(exc)})
             finally:
                 self._queue.task_done()
+
+    # ---- event push helperi (real-time relay) ----
+    def _emit(self, type: EventType, case_id: str, data: dict | None = None) -> None:
+        """Event bus'ga non-blocking push. Bus yo'q bo'lsa (eski test) — no-op.
+
+        process() event loop ichida aylanadi, shuning uchun publish() to'g'ridan-to'g'ri.
+        """
+        if self.bus is not None:
+            self.bus.publish(type, case_id, data)
 
     # ---- audit helperlari ----
     async def _audit(self, case_id: str, action: AuditAction, payload: dict | None = None) -> None:
@@ -104,6 +114,8 @@ class CaseWorker:
             AuditAction.MODEL_FAILED.value,
             {"stage": stage, "error": str(exc)},
         )
+        # degradatsiyani jonli bildiramiz (Tamoyil 6: degraded, fail emas)
+        self._emit(EventType.MODEL_FAILED, case_id, {"stage": stage, "error": str(exc)})
 
     # ---- bosqichlar ----
     async def _run_stt(self, case_id: str, audio_path: str | None) -> tuple[dict, float, bool]:
@@ -166,7 +178,15 @@ class CaseWorker:
                     await self._audit_fail(case_id, "llm", exc)
         return dict(_EMPTY_EXPLANATION), (time.perf_counter() - t0) * 1000, True
 
-    # ---- asosiy pipeline ----
+    # ---- Tier 2 (LLM) qaror: sozlanadigan flag (Tamoyil 7) ----
+    def _should_run_llm(self, level: str) -> bool:
+        """LLM (GPU) avtomatik ishlaydimi? Default: faqat HIGH. On-demand
+        (POST /cases/{id}/explain) har doim mumkin (bu yerda emas)."""
+        if self.s.llm_auto_always:
+            return True
+        return self.s.llm_auto_on_high and level == "HIGH"
+
+    # ---- asosiy pipeline (tiered, event-driven) ----
     async def process(self, case_id: str) -> None:
         t_start = time.perf_counter()
         timings: dict = {}
@@ -186,23 +206,17 @@ class CaseWorker:
                 audio_path = a.path
         operator_notes = case.operator_notes
 
-        # 1) parallel: STT (CPU) || detection (CPU)
-        (transcript, stt_ms, stt_failed), (detections, det_ms, det_failed) = await asyncio.gather(
-            self._run_stt(case_id, audio_path),
-            self._run_detection(case_id, image_path),
-        )
-        timings["stt"] = round(stt_ms)
-        timings["detection"] = round(det_ms)
-        degraded = degraded or stt_failed or det_failed
+        # STT (CPU, sekin bo'lishi mumkin) detection bilan PARALLEL boshlanadi,
+        # lekin Tier 1'ni BLOKLAMAYDI — natijasi LLM'dan oldin kutiladi.
+        stt_task = asyncio.create_task(self._run_stt(case_id, audio_path))
 
-        await asyncio.to_thread(self.repo.save_transcript, case_id, transcript)
-        if transcript.get("available"):
-            await self._audit(case_id, AuditAction.STT_DONE, {"language": transcript.get("language")})
+        # ===== Tier 1 (DARHOL, <1s): detection -> DETERMINISTIK risk -> PUSH =====
+        detections, det_ms, det_failed = await self._run_detection(case_id, image_path)
+        timings["detection"] = round(det_ms)
         await asyncio.to_thread(self.repo.save_detections, case_id, detections)
         if not det_failed:
             await self._audit(case_id, AuditAction.DETECTION_DONE, {"count": len(detections)})
 
-        # 2) DETERMINISTIK risk — LLM'dan OLDIN (Tamoyil 2)
         risk = await asyncio.to_thread(
             self.p["risk_engine"].compute_risk, detections, self.risk_config
         )
@@ -210,26 +224,74 @@ class CaseWorker:
         await self._audit(
             case_id, AuditAction.RISK_COMPUTED, {"level": risk["level"], "score": risk["score"]}
         )
-
-        # 3) LLM synthesis (GPU, serial, retry+timeout) — faqat tushuntirish
-        explanation, synth_ms, synth_failed = await self._run_synthesis(
-            case_id, detections, transcript, operator_notes, risk
+        # Tier 1 tayyor — operatorga DARHOL push (persist'dan KEYIN, izchillik uchun)
+        self._emit(
+            EventType.TIER1_DONE,
+            case_id,
+            {
+                "risk": {"level": risk["level"], "score": risk["score"],
+                         "computed_by": risk["computed_by"]},
+                "detections": detections,
+                "detection_failed": det_failed,
+            },
         )
-        timings["synthesis"] = round(synth_ms)
-        degraded = degraded or synth_failed
-        await asyncio.to_thread(self.repo.save_explanation, case_id, explanation)
-        if explanation.get("available"):
-            await self._audit(
-                case_id, AuditAction.EXPLANATION_DONE, {"generated_by": explanation.get("generated_by")}
-            )
+        if risk["level"] == "HIGH":
+            self._emit(EventType.ALERT, case_id, {"level": "HIGH", "score": risk["score"]})
 
-        # 4) yakunlash
+        # ===== STT natijasini kutamiz (LLM uchun kirish) =====
+        transcript, stt_ms, stt_failed = await stt_task
+        timings["stt"] = round(stt_ms)
+        await asyncio.to_thread(self.repo.save_transcript, case_id, transcript)
+        if transcript.get("available"):
+            await self._audit(case_id, AuditAction.STT_DONE, {"language": transcript.get("language")})
+        self._emit(
+            EventType.STT_DONE,
+            case_id,
+            {"available": transcript.get("available", False),
+             "language": transcript.get("language"),
+             "text": transcript.get("text")},
+        )
+        degraded = degraded or det_failed or stt_failed
+
+        # ===== Tier 2 (LLM, GPU): faqat flag bo'yicha (har skanga EMAS) =====
+        if self._should_run_llm(risk["level"]):
+            explanation, synth_ms, synth_failed = await self._run_synthesis(
+                case_id, detections, transcript, operator_notes, risk
+            )
+            degraded = degraded or synth_failed
+            await asyncio.to_thread(self.repo.save_explanation, case_id, explanation)
+            if explanation.get("available"):
+                await self._audit(
+                    case_id, AuditAction.EXPLANATION_DONE,
+                    {"generated_by": explanation.get("generated_by")},
+                )
+            self._emit(
+                EventType.EXPLANATION_DONE,
+                case_id,
+                {"available": explanation.get("available", False),
+                 "generated_by": explanation.get("generated_by"),
+                 "text": explanation.get("text")},
+            )
+        else:
+            # On-demand: hozir generatsiya YO'Q (degradatsiya emas) — operator
+            # POST /cases/{id}/explain bilan so'rashi mumkin (4-bosqich).
+            synth_ms = 0.0
+            await asyncio.to_thread(self.repo.save_explanation, case_id, dict(_EMPTY_EXPLANATION))
+            log.info("Case %s: LLM on-demand'ga qoldirildi (risk=%s)", case_id, risk["level"])
+        timings["synthesis"] = round(synth_ms)
+
+        # ===== yakunlash =====
         timings["total"] = round((time.perf_counter() - t_start) * 1000)
         await asyncio.to_thread(self.repo.set_timings, case_id, timings)
         if degraded:
             await asyncio.to_thread(self.repo.set_degraded, case_id, True)
         await asyncio.to_thread(
             self.repo.set_status, case_id, CaseStatus.DONE.value, completed=True
+        )
+        self._emit(
+            EventType.CASE_DONE,
+            case_id,
+            {"status": CaseStatus.DONE.value, "risk_level": risk["level"], "degraded": degraded},
         )
         log.info("Case %s yakunlandi (risk=%s, degraded=%s, %dms)",
                  case_id, risk["level"], degraded, timings["total"])

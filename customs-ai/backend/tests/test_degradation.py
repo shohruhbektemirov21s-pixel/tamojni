@@ -36,7 +36,8 @@ def test_stt_timeout_degrades(tmp_path):
 
 
 def test_llm_failure_degrades_not_fails(tmp_path):
-    with client_for(tmp_path) as client:
+    # LLM degradatsiyasini sinash uchun avtomatik LLM yoqilgan bo'lishi kerak
+    with client_for(tmp_path, llm_auto_always=True) as client:
         client.app.state.worker.p["explainer"] = MockExplainer(fail=True)
 
         case_id = client.post("/cases", files={"image": PNG}).json()["case_id"]

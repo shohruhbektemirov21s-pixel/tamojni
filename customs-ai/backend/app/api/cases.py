@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.core.enums import AuditAction, CaseStatus
 from app.core.errors import NotFound, ValidationFailed
+from app.core.events import EventType
 from app.schemas import (
     AuditEntryOut,
     AuditListOut,
@@ -59,6 +60,7 @@ async def create_case(
         AuditAction.CASE_CREATED.value, {"has_audio": has_audio},
     )
     await st.worker.enqueue(case_id)
+    st.event_bus.publish(EventType.CASE_CREATED, case_id, {"has_audio": has_audio, "source": "manual"})
     return CaseCreatedOut(case_id=case_id, status=CaseStatus.PENDING)
 
 

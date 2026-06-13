@@ -29,6 +29,16 @@ log = logging.getLogger("customs.risk")
 
 COMPUTED_BY = "rule_engine_v1"
 
+# "Topilmadi != xavfsiz" (qabul mezoni #4). Hech qanday MUSBAT risk hissasi
+# bo'lmaganda (bo'sh detection YOKI barcha detection floor'dan past) skor LOW
+# bo'ladi — lekin bu TOZALIK KAFOLATI EMAS: skaner ko'rish maydoni cheklangan,
+# model domain gap'i bor, yoki past-conf signal yashiringan bo'lishi mumkin.
+# Audit izi sifatida factors[] ga shu advisory yoziladi (DB JSON'da saqlanadi,
+# Tamoyil 3). Dev 5 UI banner / Dev 4 prose buni
+# `any(f["rule"] == NOT_CLEARED_RULE)` orqali aniqlaydi. Skorga hissa
+# qo'shmaydi (contribution=0.0).
+NOT_CLEARED_RULE = "nothing_scored_not_cleared"
+
 # Hisob aniqligi (audit reproduktsiyasi uchun qat'iy). Float order-bog'liqligini
 # yo'qotish maqsadida detections oldindan deterministik tartiblanadi.
 _ROUND = 4
@@ -157,6 +167,20 @@ def compute_risk(detections: list[dict], config: dict | None) -> dict:
             }
         )
         contributions.append(contribution)
+
+    # 1b) "Topilmadi != xavfsiz": musbat hissa umuman bo'lmasa (bo'sh yoki hammasi
+    # floor'dan past), audit iziga advisory qo'shamiz. Skorni O'ZGARTIRMAYDI.
+    if not contributions:
+        factors.append(
+            {
+                "rule": NOT_CLEARED_RULE,
+                "class": None,
+                "confidence": 0.0,
+                "weight": 0.0,
+                "contribution": 0.0,
+                "note": "topilmadi != xavfsiz: signal yo'qligi tozalik kafolati emas",
+            }
+        )
 
     # 2) noisy-OR agregatsiya: 1 - prod(1 - c_i). Bo'sh -> 0.0.
     prod = 1.0

@@ -115,7 +115,36 @@ export interface DecisionResult {
 }
 
 // --- SSE: GET /cases/{id}/stream -> event: status, data: {case_id, status} ---
+// (legacy coarse transport — real-time oqim endi WebSocket /ws orqali, pastda)
 export interface StreamStatusEvent {
   case_id: string
   status: CaseStatus
+}
+
+// --- WebSocket /ws push konverti (§7 schema) — ASOSIY real-time transport ---
+// Backend events.py EventType bilan AYNAN bir xil (yagona haqiqat manbai).
+// Polling YO'Q: pipeline har bosqichni shu yerga push qiladi, UI darhol render qiladi.
+export type WsEventType =
+  | 'ready' // ulanish tasdig'i (server -> client, seq=0)
+  | 'scan_ingested'
+  | 'scan_rejected'
+  | 'case_created'
+  | 'tier1_done' // detect + DETERMINISTIK risk (<1s)
+  | 'alert' // HIGH risk -> darhol signal
+  | 'stt_partial' // jonli transkript bo'lagi
+  | 'stt_done'
+  | 'explanation_token' // jonli LLM token (typing effekti)
+  | 'explanation_done'
+  | 'tts_ready'
+  | 'case_done'
+  | 'case_failed'
+  | 'model_failed' // degradatsiya (Tamoyil 6)
+  | 'backpressure'
+
+export interface WsEvent<T = Record<string, unknown>> {
+  type: WsEventType
+  case_id: string | null
+  seq: number // bus bo'yicha monotonik — tartib/qayta-ulanish uchun
+  ts: number
+  data: T
 }

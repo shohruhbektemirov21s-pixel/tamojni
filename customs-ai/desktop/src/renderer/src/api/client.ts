@@ -1,5 +1,5 @@
-// HTTP klient — faqat REST/SSE (ADR-005). Backend xatoligini operator tushunadigan
-// {error:{code,message,detail}} formatida ApiError'ga aylantiradi.
+// HTTP klient (REST) + WebSocket real-time push (ADR-005). Backend xatoligini
+// operator tushunadigan {error:{code,message,detail}} formatida ApiError'ga aylantiradi.
 import type {
   ApiErrorBody,
   AuditList,
@@ -8,10 +8,14 @@ import type {
   CaseResult,
   DecisionInput,
   DecisionResult,
+  Detection,
+  Explanation,
   Health,
+  Risk,
   RiskLevel,
+  Transcript,
   CaseStatus,
-  StreamStatusEvent
+  WsEvent
 } from '../../../shared/api-types'
 import { getBaseUrl } from './config'
 
@@ -145,77 +149,173 @@ export function submitDecision(caseId: string, input: DecisionInput): Promise<De
   })
 }
 
-// ---------------- SSE: progress (polling fallback bilan) ----------------
+// ---------------- WebSocket /ws: real-time push (Polling YO'Q) ----------------
 
-export interface StreamHandlers {
-  onStatus: (ev: StreamStatusEvent) => void
-  onError?: (err: ApiError) => void
-  onDone?: () => void
+/** REST base'dan WS URL'ini olamiz: http->ws, https->wss. */
+function wsUrl(path: string): string {
+  const base = getBaseUrl()
+  const scheme = base.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
+  return `${scheme}${path}`
 }
-
-const TERMINAL: CaseStatus[] = ['DONE', 'FAILED']
 
 /**
- * GET /cases/{id}/stream (SSE). EventSource backend endpoint'iga ulanadi.
- * Ulanish uzilsa, chaqiruvchi polling fallback'ga o'tishi mumkin (qaytgan stop()
- * orqali). Terminal holatda avtomatik yopiladi.
+ * Jonli pipeline eventlari — har biri ixtiyoriy; UI faqat keragini ulaydi.
+ * Backend `data` shakllari worker.py/events.py dan AYNAN olingan.
  */
-export function streamCase(caseId: string, h: StreamHandlers): () => void {
-  const url = `${getBaseUrl()}/cases/${encodeURIComponent(caseId)}/stream`
-  const es = new EventSource(url)
-  let closed = false
-
-  const close = (): void => {
-    if (closed) return
-    closed = true
-    es.close()
-  }
-
-  es.addEventListener('status', (ev) => {
-    try {
-      const data = JSON.parse((ev as MessageEvent).data) as StreamStatusEvent
-      h.onStatus(data)
-      if (TERMINAL.includes(data.status)) {
-        close()
-        h.onDone?.()
-      }
-    } catch {
-      /* buzuq frame — e'tiborsiz */
-    }
-  })
-
-  es.onerror = () => {
-    // SSE uzildi: chaqiruvchi polling'ga o'tadi.
-    if (!closed) h.onError?.(new ApiError('network_error', 'SSE ulanishi uzildi', 0))
-  }
-
-  return close
+export interface CaseEventHandlers {
+  onStatus?: (s: CaseStatus) => void
+  /** Tier 1 (<1s): detect + DETERMINISTIK risk darhol keladi. */
+  onTier1?: (detections: Detection[], risk: Pick<Risk, 'level' | 'score' | 'computed_by'>) => void
+  /** HIGH risk -> operatorga darhol signal (terminal'ni kutmaydi). */
+  onAlert?: (level: RiskLevel) => void
+  /** Jonli transkript bo'lagi (typing). */
+  onSttPartial?: (text: string, isFinal: boolean) => void
+  onSttDone?: (t: Pick<Transcript, 'text' | 'language' | 'available'>) => void
+  /** Jonli LLM token — qabul qilingan tartibda biriktiriladi. */
+  onExplanationToken?: (token: string) => void
+  onExplanationDone?: (e: Pick<Explanation, 'text' | 'generated_by' | 'available'>) => void
+  onTtsReady?: (meta: Record<string, unknown>) => void
+  onDegraded?: (stage: string) => void
+  /** WS ulandi/qayta ulandi. */
+  onOpen?: () => void
+  /** WS uzildi (avto qayta ulanish boshlandi). */
+  onConnLost?: () => void
 }
 
-/** SSE ishlamasa polling fallback: terminal holatga yetguncha so'raydi. */
-export function pollCaseStatus(
-  caseId: string,
-  onStatus: (s: CaseStatus) => void,
-  intervalMs = 1000
-): () => void {
-  let stopped = false
-  let last: CaseStatus | null = null
-  const tick = async (): Promise<void> => {
-    if (stopped) return
-    try {
-      const c = await getCase(caseId)
-      if (c.status !== last) {
-        last = c.status
-        onStatus(c.status)
-      }
-      if (TERMINAL.includes(c.status)) return
-    } catch {
-      /* keyingi tick'da qayta urinadi */
+/**
+ * `/ws?case_id=...` WebSocket'iga ulanadi va pipeline push eventlarini handler'larga
+ * yo'naltiradi. Polling YO'Q — uzilsa eksponensial backoff bilan avto qayta ulanadi.
+ * Qaytgan funksiya ulanishni butunlay yopadi (komponent unmount'da).
+ */
+export function connectEvents(caseId: string, h: CaseEventHandlers): () => void {
+  let closed = false
+  let ws: WebSocket | null = null
+  let pingTimer: ReturnType<typeof setInterval> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let backoff = 500
+
+  const clearPing = (): void => {
+    if (pingTimer) {
+      clearInterval(pingTimer)
+      pingTimer = null
     }
-    if (!stopped) setTimeout(tick, intervalMs)
   }
-  void tick()
-  return () => {
-    stopped = true
+
+  const dispatch = (ev: WsEvent): void => {
+    const d = ev.data as Record<string, unknown>
+    switch (ev.type) {
+      case 'ready':
+        break
+      case 'scan_ingested':
+      case 'case_created':
+        h.onStatus?.('PROCESSING')
+        break
+      case 'tier1_done':
+        h.onStatus?.('PROCESSING')
+        if (d.risk) {
+          h.onTier1?.(
+            (d.detections as Detection[]) ?? [],
+            d.risk as Pick<Risk, 'level' | 'score' | 'computed_by'>
+          )
+        }
+        break
+      case 'alert':
+        h.onAlert?.((d.level as RiskLevel) ?? 'HIGH')
+        break
+      case 'stt_partial':
+        h.onSttPartial?.(String(d.text ?? ''), Boolean(d.is_final))
+        break
+      case 'stt_done':
+        h.onSttDone?.({
+          text: (d.text as string | null) ?? null,
+          language: (d.language as string | null) ?? null,
+          available: Boolean(d.available)
+        })
+        break
+      case 'explanation_token':
+        h.onExplanationToken?.(String(d.token ?? ''))
+        break
+      case 'explanation_done':
+        h.onExplanationDone?.({
+          text: (d.text as string | null) ?? null,
+          generated_by: (d.generated_by as string | null) ?? null,
+          available: Boolean(d.available)
+        })
+        break
+      case 'tts_ready':
+        h.onTtsReady?.(d)
+        break
+      case 'model_failed':
+        h.onDegraded?.(String(d.stage ?? 'unknown'))
+        break
+      case 'case_done':
+        h.onStatus?.('DONE')
+        break
+      case 'case_failed':
+        h.onStatus?.('FAILED')
+        break
+      default:
+        break
+    }
+  }
+
+  const scheduleReconnect = (): void => {
+    if (closed || reconnectTimer) return
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connect()
+    }, backoff)
+    backoff = Math.min(backoff * 2, 5_000)
+  }
+
+  const connect = (): void => {
+    if (closed) return
+    try {
+      ws = new WebSocket(wsUrl(`/ws?case_id=${encodeURIComponent(caseId)}`))
+    } catch {
+      scheduleReconnect()
+      return
+    }
+    ws.onopen = (): void => {
+      backoff = 500
+      h.onOpen?.()
+      // keep-alive: backend recv loop uzilishni shu orqali ham aniqlaydi
+      pingTimer = setInterval(() => {
+        try {
+          if (ws?.readyState === WebSocket.OPEN) ws.send('ping')
+        } catch {
+          /* yopilayotgan bo'lishi mumkin */
+        }
+      }, 25_000)
+    }
+    ws.onmessage = (m: MessageEvent): void => {
+      try {
+        dispatch(JSON.parse(String(m.data)) as WsEvent)
+      } catch {
+        /* buzuq frame — e'tiborsiz */
+      }
+    }
+    ws.onerror = (): void => {
+      /* onclose qayta ulanishni boshqaradi */
+    }
+    ws.onclose = (): void => {
+      clearPing()
+      if (closed) return
+      h.onConnLost?.()
+      scheduleReconnect()
+    }
+  }
+
+  connect()
+
+  return (): void => {
+    closed = true
+    clearPing()
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    try {
+      ws?.close()
+    } catch {
+      /* noop */
+    }
   }
 }

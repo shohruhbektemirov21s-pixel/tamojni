@@ -11,10 +11,10 @@ const LABEL: Record<CaseStatus, string> = {
 
 export function ProgressTracker({
   status,
-  viaSse
+  live
 }: {
   status: CaseStatus
-  viaSse: boolean
+  live: boolean
 }): JSX.Element {
   const failed = status === 'FAILED'
   const idx = ORDER.indexOf(status === 'FAILED' ? 'PROCESSING' : status)
@@ -24,7 +24,7 @@ export function ProgressTracker({
       <div className="section-head">
         <h3>Holat</h3>
         <span className="faint" style={{ fontSize: 11 }}>
-          {viaSse ? '● jonli (SSE)' : '○ polling'}
+          {live ? '● jonli (WebSocket)' : '○ ulanmoqda…'}
         </span>
       </div>
       <div className="stepper">

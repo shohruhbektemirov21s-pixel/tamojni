@@ -37,6 +37,21 @@ ishonchsiz. Shuning uchun **domain fine-tuning SHART**. Generic modelга ishonm
 | `train_baseline.py` | Ultralytics YOLOv11 fine-tune (recall-favoring) |
 | `evaluate.py`       | DETERMINISTIK per-class recall; qurol recall >= 0.95 gate |
 | `export_onnx.py`    | best.pt -> model.onnx (opset 12) + sha256 + labels nusxasi |
+| `benchmark_latency.py` | REAL-TIME latency gate (qabul mezoni #1: detect() < 300ms); p50/p95, bosqichlarga ajratadi |
+
+## Latency gate (qabul mezoni #1: real-time kritik yo'l)
+`detect()` < 300ms/rasm bo'lishi SHART (operator har skanga darhol natija ko'radi).
+`benchmark_latency.py` buni p95 bilan tekshiradi va bosqichlarga ajratadi
+(preprocess / inference / postprocess) — bottleneck ko'rinsin:
+```
+# To'liq (real model + onnxruntime):
+python ml/benchmark_latency.py --model backend/model_registry/v0_baseline/model.onnx \
+    --image sample_xray.png --iters 50 --warmup 5 --budget-ms 300
+# Modelsiz (CI smoke): sof-numpy pre/post-process regressiyasini ushlaydi.
+python ml/benchmark_latency.py
+```
+Inference budjeti model kelganda to'liq o'lchanadi; pre/post-process (men egalik
+qiladigan numpy qism) ~11ms p95 — budjetning kichik ulushi.
 
 ## Qabul gate'i (release oldidan)
 - **qurol RECALL >= 0.95** (`evaluate.py` qizil/yashil qaytaradi).

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CaseResult, CaseStatus, DecisionType } from '../../../shared/api-types'
-import { getCase, pollCaseStatus, streamCase, submitDecision } from '../api/client'
+import type { CaseResult, CaseStatus, DecisionType, RiskLevel } from '../../../shared/api-types'
+import { connectEvents, getCase, submitDecision } from '../api/client'
 import { ErrorBox } from '../components/ErrorBox'
 import { ProgressTracker } from '../components/ProgressTracker'
 import { RiskPanel } from '../components/RiskPanel'
@@ -23,31 +23,28 @@ export function CaseView({
   onBack: () => void
 }): JSX.Element {
   const [status, setStatus] = useState<CaseStatus>('PENDING')
-  const [viaSse, setViaSse] = useState(true)
+  const [live, setLive] = useState(false) // WS ulanganmi (jonli push)
   const [result, setResult] = useState<CaseResult | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [decisionDone, setDecisionDone] = useState<string | null>(null) // audit_id
   const [submitting, setSubmitting] = useState(false)
 
-  // --- Live progress: SSE, uzilsa polling fallback ---
+  // --- Jonli oqim (terminal'gacha ko'rsatiladigan, getCase'dan oldin) ---
+  const [liveAlert, setLiveAlert] = useState<RiskLevel | null>(null)
+  const [liveTranscript, setLiveTranscript] = useState('') // STT partial typing
+  const [liveExplanation, setLiveExplanation] = useState('') // LLM token typing
+
+  // --- Real-time push: WebSocket /ws (Polling YO'Q, avto qayta ulanish) ---
   useEffect(() => {
-    let stopPoll: (() => void) | null = null
-    const handleStatus = (s: CaseStatus): void => setStatus(s)
-
-    const stopSse = streamCase(caseId, {
-      onStatus: (ev) => handleStatus(ev.status),
-      onDone: () => void 0,
-      onError: () => {
-        // SSE uzildi -> polling'ga o'tamiz
-        setViaSse(false)
-        if (!stopPoll) stopPoll = pollCaseStatus(caseId, handleStatus)
-      }
+    const stop = connectEvents(caseId, {
+      onOpen: () => setLive(true),
+      onConnLost: () => setLive(false),
+      onStatus: setStatus,
+      onAlert: (level) => setLiveAlert(level),
+      onSttPartial: (text) => setLiveTranscript(text),
+      onExplanationToken: (token) => setLiveExplanation((prev) => prev + token)
     })
-
-    return () => {
-      stopSse()
-      stopPoll?.()
-    }
+    return stop
   }, [caseId])
 
   // --- Terminal holatda to'liq natijani yuklash ---
@@ -87,16 +84,59 @@ export function CaseView({
 
       {error != null && <ErrorBox error={error} />}
 
-      <ProgressTracker status={status} viaSse={viaSse} />
+      <ProgressTracker status={status} live={live} />
 
-      {/* Natija hali yo'q (PENDING/PROCESSING) */}
+      {/* Natija hali yo'q (PENDING/PROCESSING) — jonli oqimni shu yerda ko'rsatamiz */}
       {status !== 'DONE' && status !== 'FAILED' && (
-        <div className="card">
-          <div className="row">
-            <span className="spinner" />
-            <span className="muted">Tahlil davom etmoqda. Natija tayyor bo&apos;lishi bilan ko&apos;rsatiladi…</span>
+        <>
+          {/* HIGH alert: terminal'ni KUTMAYDI — push kelishi bilan darhol */}
+          {liveAlert === 'HIGH' && (
+            <div className="high-alert">
+              <span className="ico">🚨</span>
+              <div>
+                <strong>YUQORI XAVF (HIGH).</strong> Tier-1 baho darhol signal berdi. To&apos;liq
+                natija tayyorlanmoqda…
+              </div>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="row">
+              <span className="spinner" />
+              <span className="muted">
+                Tahlil davom etmoqda. Natija tayyor bo&apos;lishi bilan ko&apos;rsatiladi…
+              </span>
+            </div>
           </div>
-        </div>
+
+          {/* Jonli transkript (STT partial typing) */}
+          {liveTranscript && (
+            <div className="card">
+              <div className="section-head">
+                <h3>Ovoz transkripti</h3>
+                <span className="faint" style={{ fontSize: 11 }}>● jonli</span>
+              </div>
+              <p style={{ margin: 0 }}>
+                {liveTranscript}
+                <span className="spinner" style={{ marginLeft: 6 }} />
+              </p>
+            </div>
+          )}
+
+          {/* Jonli AI tushuntirishi (LLM token typing) */}
+          {liveExplanation && (
+            <div className="card">
+              <div className="section-head">
+                <h3>AI tushuntirishi</h3>
+                <span className="faint" style={{ fontSize: 11 }}>● jonli generatsiya</span>
+              </div>
+              <p style={{ margin: 0 }}>
+                {liveExplanation}
+                <span className="spinner" style={{ marginLeft: 6 }} />
+              </p>
+            </div>
+          )}
+        </>
       )}
 
       {result && (

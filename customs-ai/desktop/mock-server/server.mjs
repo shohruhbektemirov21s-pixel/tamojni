@@ -7,6 +7,7 @@
 import express from 'express'
 import multer from 'multer'
 import cors from 'cors'
+import crypto from 'crypto'
 
 const PORT = process.env.MOCK_PORT ? Number(process.env.MOCK_PORT) : 8787
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } })
@@ -14,6 +15,56 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// ============ WebSocket /ws — real-time push (dep YO'Q, qo'lda RFC6455) ============
+// Backend events.py konverti bilan AYNAN: {type, case_id, seq, ts, data}.
+// Minimal: faqat server->client text frame yuboramiz; client frame'lari (ping/keep-alive)
+// e'tiborsiz (uzilish TCP 'close' orqali aniqlanadi).
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+/** @type {Set<{socket:any, caseId:string|null}>} */
+const wsClients = new Set()
+let wsSeq = 0
+
+function wsEncode(str) {
+  const payload = Buffer.from(str, 'utf8')
+  const len = payload.length
+  let header
+  if (len < 126) {
+    header = Buffer.from([0x81, len])
+  } else if (len < 65536) {
+    header = Buffer.alloc(4)
+    header[0] = 0x81
+    header[1] = 126
+    header.writeUInt16BE(len, 2)
+  } else {
+    header = Buffer.alloc(10)
+    header[0] = 0x81
+    header[1] = 127
+    header.writeUInt32BE(0, 2)
+    header.writeUInt32BE(len, 6)
+  }
+  return Buffer.concat([header, payload])
+}
+
+function wsSend(client, obj) {
+  try {
+    client.socket.write(wsEncode(JSON.stringify(obj)))
+  } catch {
+    wsClients.delete(client)
+  }
+}
+
+// Backend bus'i kabi fan-out: case_id mos kelganlarga (yoki global subscriber'ga).
+function publishWs(caseId, type, data) {
+  wsSeq += 1
+  const evt = { type, case_id: caseId, seq: wsSeq, ts: Date.now() / 1000, data: data ?? {} }
+  for (const c of wsClients) {
+    if (c.caseId && caseId && c.caseId !== caseId) continue
+    wsSend(c, evt)
+  }
+}
 
 // ---------------- xotira ombori ----------------
 /** @type {Map<string, any>} */
@@ -138,15 +189,70 @@ function serialize(c) {
   }
 }
 
-// ---------------- pipeline simulyatsiyasi ----------------
-function runPipeline(c) {
-  setTimeout(() => {
-    c.status = 'PROCESSING'
-  }, 800)
-  setTimeout(() => {
-    finalizeResult(c)
-    c.status = 'DONE'
-  }, 2600)
+// ---------------- pipeline simulyatsiyasi (jonli WS push) ----------------
+// Real backend worker.py oqimini taqlid qiladi: tier1 (<1s) -> STT partial typing
+// -> LLM token typing -> case_done. Har bosqich /ws orqali darhol push qilinadi.
+async function runPipeline(c) {
+  const sc = c._scenario
+  const risk = computeRisk(sc.detections)
+
+  publishWs(c.case_id, 'case_created', { status: 'PENDING' })
+  await sleep(500)
+  c.status = 'PROCESSING'
+
+  // --- Tier 1 (<1s): detect + DETERMINISTIK risk -> darhol ---
+  publishWs(c.case_id, 'tier1_done', {
+    risk: { level: risk.level, score: risk.score, computed_by: risk.computed_by },
+    detections: sc.detections,
+    detection_failed: false
+  })
+  if (risk.level === 'HIGH') publishWs(c.case_id, 'alert', { level: 'HIGH', score: risk.score })
+
+  // --- STT (jonli partial typing) ---
+  if (sc.sttOk) {
+    const words = "Yuk hujjatlari to'liq, deklaratsiya raqami 4521.".split(' ')
+    let acc = ''
+    for (let i = 0; i < words.length; i++) {
+      await sleep(170)
+      acc += (i ? ' ' : '') + words[i]
+      publishWs(c.case_id, 'stt_partial', {
+        text: acc,
+        is_final: i === words.length - 1,
+        language: 'uz'
+      })
+    }
+    publishWs(c.case_id, 'stt_done', { available: true, language: 'uz', text: acc })
+  } else {
+    await sleep(300)
+    publishWs(c.case_id, 'model_failed', { stage: 'stt', error: 'mock degraded' })
+    publishWs(c.case_id, 'stt_done', { available: false, language: null, text: null })
+  }
+
+  // --- LLM (jonli token typing) ---
+  if (sc.llmOk) {
+    const text = `Aniqlangan ${sc.detections.length} ta obyekt asosida risk darajasi ${risk.level} (${risk.score}). Eng katta hissa "${risk.factors[0]?.class ?? '—'}" sinfidan. Operator ko'rib chiqishi tavsiya etiladi.`
+    const toks = text.match(/\S+\s*/g) ?? [text]
+    for (const t of toks) {
+      await sleep(60)
+      publishWs(c.case_id, 'explanation_token', { token: t })
+    }
+    publishWs(c.case_id, 'explanation_done', {
+      available: true,
+      generated_by: 'mock-qwen3-4b',
+      text
+    })
+  } else {
+    publishWs(c.case_id, 'model_failed', { stage: 'llm', error: 'mock degraded' })
+  }
+
+  // --- yakunlash: REST snapshot (getCase) + case_done ---
+  finalizeResult(c)
+  c.status = 'DONE'
+  publishWs(c.case_id, 'case_done', {
+    status: 'DONE',
+    risk_level: risk.level,
+    degraded: sc.degraded
+  })
 }
 
 // ==================== ENDPOINTLAR (§7) ====================
@@ -185,7 +291,8 @@ app.post('/cases', upload.fields([{ name: 'image', maxCount: 1 }, { name: 'audio
     has_audio: !!req.files?.audio?.[0]
   })
   cases.set(id, c)
-  runPipeline(c)
+  // fon: jonli pipeline (WS push) — javobni bloklamaydi
+  runPipeline(c).catch((e) => console.error('[mock] pipeline xato:', e))
   res.status(201).json({ case_id: id, status: 'PENDING' })
 })
 
@@ -268,8 +375,39 @@ app.get('/cases/:id/stream', (req, res) => {
   req.on('close', () => clearInterval(tick))
 })
 
-app.listen(PORT, '127.0.0.1', () => {
+const server = app.listen(PORT, '127.0.0.1', () => {
   // eslint-disable-next-line no-console
   console.log(`[mock] §7 backend taqlidi: http://127.0.0.1:${PORT}`)
+  console.log(`[mock] WebSocket real-time: ws://127.0.0.1:${PORT}/ws`)
   console.log(`[mock] App Sozlamalar -> endpoint = http://127.0.0.1:${PORT}`)
+})
+
+// WS upgrade — /ws (ixtiyoriy ?case_id=... filtri bilan)
+server.on('upgrade', (req, socket) => {
+  let url
+  try {
+    url = new URL(req.url, 'http://127.0.0.1')
+  } catch {
+    socket.destroy()
+    return
+  }
+  const key = req.headers['sec-websocket-key']
+  if (url.pathname !== '/ws' || !key) {
+    socket.destroy()
+    return
+  }
+  const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64')
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+  )
+  const client = { socket, caseId: url.searchParams.get('case_id') }
+  wsClients.add(client)
+  wsSend(client, { type: 'ready', case_id: client.caseId, seq: 0, ts: Date.now() / 1000, data: {} })
+  // client frame'lari (ping/keep-alive) — e'tiborsiz; uzilishni 'close' aniqlaydi
+  socket.on('data', () => {})
+  socket.on('close', () => wsClients.delete(client))
+  socket.on('error', () => wsClients.delete(client))
 })

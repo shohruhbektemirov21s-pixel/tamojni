@@ -1,7 +1,12 @@
 """Production deterministik risk engine (scoring.RuleEngine, Tamoyil 2 / ADR-004)."""
 from __future__ import annotations
 
-from app.pipelines.scoring import RuleEngine, compute_risk, decide_level
+from app.pipelines.scoring import (
+    NOT_CLEARED_RULE,
+    RuleEngine,
+    compute_risk,
+    decide_level,
+)
 
 CFG = {
     "default_weight": 0.2,
@@ -34,10 +39,30 @@ def test_computed_by_is_v1():
     assert r["computed_by"] == "rule_engine_v1"
 
 
-# --- "topilmadi" -> LOW ---
-def test_empty_is_low():
+# --- "topilmadi" -> LOW + "topilmadi != xavfsiz" signali (qabul mezoni #4) ---
+def test_empty_is_low_with_not_cleared_signal():
     r = compute_risk([], CFG)
-    assert r["level"] == "LOW" and r["score"] == 0.0 and r["factors"] == []
+    assert r["level"] == "LOW" and r["score"] == 0.0
+    # Bo'sh emas: "topilmadi != xavfsiz" advisory factors[] da bo'lishi SHART.
+    assert len(r["factors"]) == 1
+    f = r["factors"][0]
+    assert f["rule"] == NOT_CLEARED_RULE
+    assert f["contribution"] == 0.0  # skorga ta'sir qilmaydi
+
+
+def test_all_below_floor_emits_not_cleared_signal():
+    # Model nimadir ko'rdi, lekin hammasi floor'dan past -> skor 0, ammo
+    # "tozalik kafolati emas" signali ham, below-floor audit izi ham bo'ladi.
+    r = compute_risk([_det("pichoq", 0.20), _det("organik_anomaliya", 0.05)], CFG)
+    assert r["level"] == "LOW" and r["score"] == 0.0
+    rules = [f["rule"] for f in r["factors"]]
+    assert NOT_CLEARED_RULE in rules
+    assert "below_confidence_floor" in rules
+
+
+def test_positive_contribution_has_no_not_cleared_signal():
+    r = compute_risk([_det("qurol", 0.9)], CFG)
+    assert all(f["rule"] != NOT_CLEARED_RULE for f in r["factors"])
 
 
 # --- noisy-OR chegaralari ---
